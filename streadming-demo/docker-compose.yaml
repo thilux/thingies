@@ -1,0 +1,17 @@
+version: '3'
+services:
+  redis:
+    image: redis/redis-stack
+    ports:
+      - "8001:8001"
+  producer:
+    build: ./producer/
+    command: ["./main", "wheredatalives", "100", "mygroup", "200"]  # Example parameters
+    depends_on:
+      - redis
+  consumer:  # New consumer service
+    build: ./consumer/
+    command: ["./main", "wheredatalives", "mygroup", "2000"]  # Start consumer with stream and group name
+    depends_on:
+      - redis
+
