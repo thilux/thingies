@@ -1,0 +1,697 @@
+Source: https://evolpin.wordpress.com/2020/12/30/elasticsearch-cluster-using-docker-compose-with-basic-security-and-snapshots/
+
+
+Elasticsearch cluster using docker-compose, with basic security and snapshots
+
+30
+DEC
+Download this post’s sample and rename to zip; then unzipDownload
+For a single-node docker deployment see here: https://evolpin.wordpress.com/2020/12/29/elasticsearch-single-node-using-docker-kibana-with-snapshots-config-and-basic-security/
+
+Although a single-node docker deployment is a good solution for development, I was interested seeing how to deploy multiple nodes with dedicated roles. Elasticsearch webinars and documentation specify a wide range of node roles, but their documentation example for docker-compose only demonstrates a standard 3 general purpose nodes. So. if you are only interested in that you can easily copy the example here. I was interested more in setting up various node roles alongside basic security, snapshots and configuration. Therefore I combined some minimal setup using the Elasticsearch documentation, specifically this: setting up a multi-node cluster with TLS.
+
+Disclaimer: this post is heavily relying on the good work and documentation done by Elasticsearch, done with minor changes to accomplish what I was looking for.
+
+Setup
+
+Consider creating a top-level parent folder, which will contain subfolders for backups, config and data. On my dev machine this looks like this:
+
+F:\Projects\Elasticsearch\docker_compose_security
+backups
+certs
+config
+elasticsearch.yml
+kibana.yml
+data
+data01
+data02
+data03
+data04
+Note: I am pre-creating the dataXX subfolders, as I had noticed that sometimes if I do not, Elasticsearch nodes complain about lack of permissions.
+
+Setting up a cluster with master and data nodes, config, basic security and snapshots.
+
+Elasticsearch documentation specifies that: “The vm.max_map_count kernel setting must be set to at least 262144 for production use.” I had noticed that this was also required on my dev machine. More over, at times (usually after vmmem increased over 8GB and seems to have crashed docker), this settings was reset back to its default and I had to change it again. Anyhow on Windows with Docker Desktop using WSL2 this is done like so:
+
+wsl -d docker-desktop
+sysctl -w vm.max_map_count=262144
+Within the config folder, create elasticsearch.yml file with the following configuration:
+1
+2
+3
+4
+5
+6
+7
+8
+9
+cluster.name: "es-docker-cluster"
+network.host: 0.0.0.0
+cluster.routing.allocation.disk.watermark.low: 10gb
+cluster.routing.allocation.disk.watermark.high: 5gb
+cluster.routing.allocation.disk.watermark.flood_stage: 1gb
+cluster.info.update.interval: 1m
+path:
+  repo:
+    - "/my_backup"
+Note: you can change the watermarks or remove them completely.
+
+Create kibana.yml file with the following configuration:
+1
+2
+3
+server.name: kibana
+server.host: "0"
+monitoring.ui.container.elasticsearch.enabled: true
+TLS
+Unfortunately, unlike the single-node deployment, for multi-node deployment with basic security enabled, you are required to create certificates and configure your deployment to use them.
+
+Reusing the Elasticsearch documentation for TLS deployment, I created the following files with minor changes.
+
+instances.yml (will be used to create certificates for 5 nodes):
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+instances:
+  - name: es01
+    dns:
+      - es01 
+      - localhost
+    ip:
+      - 127.0.0.1
+ 
+  - name: es02
+    dns:
+      - es02
+      - localhost
+    ip:
+      - 127.0.0.1
+       
+  - name: es03
+    dns:
+      - es03
+      - localhost
+    ip:
+      - 127.0.0.1
+ 
+  - name: es04
+    dns:
+      - es04
+      - localhost
+    ip:
+      - 127.0.0.1
+ 
+  - name: 'kib01'
+    dns: 
+      - kib01
+      - localhost
+.env (used by docker-compose as env variables; change ROOT as required):
+
+1
+2
+3
+4
+COMPOSE_PROJECT_NAME=es 
+CERTS_DIR=/usr/share/elasticsearch/config/certificates 
+VERSION=7.10.1
+ROOT=F:\Projects\Elasticsearch\docker_compose_security
+create-certs.yml (this will generate certificates according to the instances.yml file):
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+version: '2.2'
+ 
+services:
+  create_certs:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${VERSION}
+    container_name: create_certs
+    command: >
+      bash -c '
+        yum install -y -q -e 0 unzip;
+        if [[ ! -f /certs/bundle.zip ]]; then
+          bin/elasticsearch-certutil cert --silent --pem --in config/certificates/instances.yml -out /certs/bundle.zip;
+          unzip /certs/bundle.zip -d /certs; 
+        fi;
+        chown -R 1000:0 /certs
+      '
+    working_dir: /usr/share/elasticsearch
+    volumes: 
+      - ${ROOT}\certs:/certs
+      - .:/usr/share/elasticsearch/config/certificates
+    networks:
+      - elastic        
+ 
+volumes: 
+  certs:
+    driver: local
+ 
+networks:
+  elastic:
+    driver: bridge
+docker-compose.yml (this file specifies for docker-compose the 4 Elasticsearch nodes + 1 Kibana):
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+150
+151
+152
+153
+154
+155
+156
+157
+158
+159
+160
+161
+162
+163
+164
+165
+166
+167
+168
+169
+170
+171
+172
+173
+174
+175
+176
+177
+178
+179
+180
+181
+182
+version: '2.2'
+ 
+services:
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${VERSION}
+    container_name: es01
+    environment:
+      - node.name=es01
+      - cluster.name=es-docker-cluster      
+      - discovery.seed_hosts=es02,es03
+      - cluster.initial_master_nodes=es01,es02
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"      
+      - xpack.license.self_generated.type=trial # <1>
+      - xpack.security.enabled=true      
+      - xpack.security.http.ssl.enabled=true # <2>
+      - xpack.security.http.ssl.key=$CERTS_DIR/es01/es01.key
+      - xpack.security.http.ssl.certificate_authorities=$CERTS_DIR/ca/ca.crt
+      - xpack.security.http.ssl.certificate=$CERTS_DIR/es01/es01.crt
+      - xpack.security.transport.ssl.enabled=true # <3>
+      - xpack.security.transport.ssl.verification_mode=certificate # <4>
+      - xpack.security.transport.ssl.certificate_authorities=$CERTS_DIR/ca/ca.crt
+      - xpack.security.transport.ssl.certificate=$CERTS_DIR/es01/es01.crt
+      - xpack.security.transport.ssl.key=$CERTS_DIR/es01/es01.key
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes: 
+      - ${ROOT}\data\data01:/usr/share/elasticsearch/data
+      - ${ROOT}\backups:/my_backup
+      - ${ROOT}\config\elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+      - ${ROOT}\certs:$CERTS_DIR
+    ports:
+      - 9200:9200
+    networks:
+      - elastic
+       
+    healthcheck:
+      test: curl --cacert $CERTS_DIR/ca/ca.crt -s https://localhost:9200 >/dev/null; if [[ $$? == 52 ]]; then echo 0; else echo 1; fi
+      interval: 30s
+      timeout: 10s
+      retries: 5
+ 
+  es02:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${VERSION}
+    container_name: es02
+    environment:
+      - node.name=es02
+      - cluster.name=es-docker-cluster
+      - discovery.seed_hosts=es01,es03
+      - cluster.initial_master_nodes=es01,es02
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.license.self_generated.type=trial
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=$CERTS_DIR/es02/es02.key
+      - xpack.security.http.ssl.certificate_authorities=$CERTS_DIR/ca/ca.crt
+      - xpack.security.http.ssl.certificate=$CERTS_DIR/es02/es02.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.verification_mode=certificate 
+      - xpack.security.transport.ssl.certificate_authorities=$CERTS_DIR/ca/ca.crt
+      - xpack.security.transport.ssl.certificate=$CERTS_DIR/es02/es02.crt
+      - xpack.security.transport.ssl.key=$CERTS_DIR/es02/es02.key
+      - node.roles=master,data
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ${ROOT}\data\data02:/usr/share/elasticsearch/data
+      - ${ROOT}\backups:/my_backup
+      - ${ROOT}\config\elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+      - ${ROOT}\certs:$CERTS_DIR
+    networks:
+      - elastic
+       
+  es03:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${VERSION}
+    container_name: es03
+    environment:
+      - node.name=es03
+      - cluster.name=es-docker-cluster
+      - discovery.seed_hosts=es01,es02
+      - cluster.initial_master_nodes=es01,es02
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.license.self_generated.type=trial
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=$CERTS_DIR/es03/es03.key
+      - xpack.security.http.ssl.certificate_authorities=$CERTS_DIR/ca/ca.crt
+      - xpack.security.http.ssl.certificate=$CERTS_DIR/es03/es03.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.verification_mode=certificate 
+      - xpack.security.transport.ssl.certificate_authorities=$CERTS_DIR/ca/ca.crt
+      - xpack.security.transport.ssl.certificate=$CERTS_DIR/es03/es03.crt
+      - xpack.security.transport.ssl.key=$CERTS_DIR/es03/es03.key
+      - node.roles=data
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes: 
+      - ${ROOT}\data\data03:/usr/share/elasticsearch/data
+      - ${ROOT}\backups:/my_backup
+      - ${ROOT}\config\elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+      - ${ROOT}\certs:$CERTS_DIR
+    networks:
+      - elastic
+ 
+  es04:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${VERSION}
+    container_name: es04
+    environment:
+      - node.name=es04
+      - cluster.name=es-docker-cluster
+      - discovery.seed_hosts=es01,es02
+      - cluster.initial_master_nodes=es01,es02
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.license.self_generated.type=trial
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=$CERTS_DIR/es04/es04.key
+      - xpack.security.http.ssl.certificate_authorities=$CERTS_DIR/ca/ca.crt
+      - xpack.security.http.ssl.certificate=$CERTS_DIR/es04/es04.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.verification_mode=certificate 
+      - xpack.security.transport.ssl.certificate_authorities=$CERTS_DIR/ca/ca.crt
+      - xpack.security.transport.ssl.certificate=$CERTS_DIR/es04/es04.crt
+      - xpack.security.transport.ssl.key=$CERTS_DIR/es04/es04.key
+      - node.roles=data
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes: 
+      - ${ROOT}\data\data04:/usr/share/elasticsearch/data
+      - ${ROOT}\backups:/my_backup
+      - ${ROOT}\config\elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+      - ${ROOT}\certs:$CERTS_DIR
+    networks:
+      - elastic
+ 
+  kib01:
+    image: docker.elastic.co/kibana/kibana:${VERSION}
+    container_name: kib01
+    depends_on: {"es01": {"condition": "service_healthy"}}
+    ports:
+      - 5601:5601    
+    environment:
+      SERVERNAME: localhost
+      ELASTICSEARCH_URL: https://es01:9200
+      ELASTICSEARCH_HOSTS: '["https://es01:9200","https://es02:9200"]'
+      ELASTICSEARCH_USERNAME: kibana_system
+      ELASTICSEARCH_PASSWORD: myPassw0rd
+      ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES: $CERTS_DIR/ca/ca.crt
+      SERVER_SSL_ENABLED: "true"
+      SERVER_SSL_KEY: $CERTS_DIR/kib01/kib01.key
+      SERVER_SSL_CERTIFICATE: $CERTS_DIR/kib01/kib01.crt
+    volumes: 
+      - ${ROOT}\certs:$CERTS_DIR
+      - ${ROOT}\config\kibana.yml:/usr/share/kibana/config/kibana.yml
+    networks:
+      - elastic    
+volumes:
+  data01:
+    driver: local
+  data02:
+    driver: local
+  data03:
+    driver: local
+  data04:
+    driver: local
+  certs:
+    driver: local
+ 
+networks: 
+  elastic:
+    driver: bridge
+Please note the following in this file, highlighted above:
+
+es01 will be created as a general purpose node (e.g. master, data etc’) – no changes here.
+es02 will be created as a master and data node.
+es03 and es04 will be created as data only nodes.
+The Kibana node can be configured to work with multiple hosts.
+The Kibana node will require a password. If you prefer a manual password then you can already set it. If you prefer to have it auto-generated you will need to first run the command to generate it and then recreate the kibana node with the password.
+Generating certificates:
+
+docker-compose -f create-certs.yml run --rm create_certs
+Running the cluster:
+
+docker-compose up
+To set passwords manually:
+
+docker exec -it es01 bash
+And from within the docker container execute the following commands and set the passwords. Make sure that either the kibana_system password matches what you have in the docker-compose.yml file, or that you change the password in that file to match the password you will be setting now.
+
+bin/elasticsearch-setup-passwords interactive --url https://es01:9200
+Restart:
+
+docker-compose restart
+Note: on my dev machine sometimes docker at this point crashes. After restarting, double-check the wsl vm.max_map_count as explained above.
+
+Advertisement
+
+After docker-compose has completed, you should be able to browse to https://localhost:5601/ (don’t forget the https). Allow your browser to access despite the certificate warning.
+
+
+After logging-in to Kibana, go to Dev Tools and check the nodes:
+
+1
+GET /_cat/nodes
+
+The nodes are displayed to the right with their different assigned roles.
+
+Testing snapshots
+
+After logging-in to Kibana, go to Dev Tools and copy-paste the code below. Run each command one after another. This sample will: create an index with a document, backup the index (snapshot), delete the index, and finally restore the index:
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+# create new index with a new document
+PUT test/_doc/1
+{
+  "first_name": "john",
+  "last_name": "doe"
+}
+  
+# retrieve to see contents
+GET test/_doc/1
+  
+# register a new filesystem repository
+# (if this works well, you should see in your 'backups' folder a new subfolder)
+PUT /_snapshot/my_fs_backup
+{
+  "type": "fs",
+  "settings": {
+    "location": "my_fs_backup_location",
+    "compress": true
+  }
+}
+  
+# backup
+# (if this works well, you should now have contents in the 'my_fs_backup_location' subfolder)
+PUT /_snapshot/my_fs_backup/snapshot_1?wait_for_completion=true
+{
+  "indices": "test"
+}
+  
+# delete index
+DELETE test
+  
+# this should now fail with 'index_not_found_exception'
+GET test/_doc/1
+  
+# restore
+POST /_snapshot/my_fs_backup/snapshot_1/_restore?wait_for_completion=true
+  
+# this should now fetch the document
+GET test/_doc/1
+References:
+
+Main document: https://www.elastic.co/guide/en/elastic-stack-get-started/7.10/get-started-docker.html#get-started-docker-tls
+Node roles: https://www.elastic.co/guide/en/elasticsearch/reference/current/modules-node.html#node-roles
+Snapshots: https://www.elastic.co/guide/en/elasticsearch/reference/current/snapshot-restore.html
